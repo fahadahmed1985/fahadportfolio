@@ -1,9 +1,17 @@
-.venv/
-__pycache__/
-*.pyc
-.env
-logs/
+# generated media
 voice/
 subtitles/
 final/
-data/
+logs/
+
+# source media
+backgrounds/
+music/
+
+# excel pipeline
+data/*.xlsx
+
+# python
+.venv/
+__pycache__/
+*.pyc
