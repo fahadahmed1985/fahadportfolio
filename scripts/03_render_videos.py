@@ -20,8 +20,22 @@ SUBTITLE_COLORS = [
     "&HFFFF00&"    # cyan
 ]
 
+HOOK_DURATION = 2.0
+HOOK_FADE_IN = 0.35
+HOOK_START_Y = 90
+HOOK_END_Y = 140
+
+SCENE_BACKGROUNDS = {
+    "city": "bg_city_skyline_night.mp4",
+    "mountain": "bg_mountain_sunrise.mp4",
+    "ocean": "bg_ocean_waves_sunrise.mp4",
+    "work": "bg_person_working_laptop.mp4",
+    "running": "bg_running_athlete.mp4",
+    "sunrise": "bg_mountain_sunrise.mp4"
+}
+
+
 def parse_srt_timestamp(ts: str) -> float:
-    # "HH:MM:SS,mmm" -> seconds
     h, m, s_ms = ts.split(":")
     s, ms = s_ms.split(",")
     return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
@@ -41,10 +55,6 @@ def format_srt_timestamp(seconds: float) -> str:
 
 
 def scale_srt_file(input_srt: Path, speed: float) -> Path:
-    """
-    Adjust subtitle timings to match sped-up audio/video.
-    If speed = 1.10, subtitle timestamps should be divided by 1.10.
-    """
     with input_srt.open("r", encoding="utf-8") as f:
         content = f.read()
 
@@ -76,14 +86,23 @@ LOGO_FILE = Path("assets/logo.png")
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPROBE = r"C:\ffmpeg\bin\ffprobe.exe"
 
-MAX_ROWS = 1           # test first
+MAX_ROWS = 1
 SPEED = 1.10
 OUTRO_DURATION = 1.0
 FADE_DURATION = 0.5
-HOOK_DURATION = 2.0
 
 
-def get_background():
+def get_background(scene_type: str) -> Path:
+    scene_type = str(scene_type).strip().lower()
+
+    background_file = SCENE_BACKGROUNDS.get(scene_type)
+
+    if background_file:
+        bg_path = BG_FOLDER / background_file
+        if bg_path.exists():
+            return bg_path
+
+    # fallback to random if scene type missing or file not found
     videos = list(BG_FOLDER.glob("*.mp4"))
     if not videos:
         raise FileNotFoundError("No background videos found in backgrounds/")
@@ -190,8 +209,7 @@ def render_video(bg: Path, voice: Path, subtitle: Path, output: Path, hook_overl
     subtitle_style = build_subtitle_style(pick_subtitle_style())
     hook_text = escape_drawtext(hook_overlay)
     hook_color = random.choice(HOOK_COLORS)
-    
-    # Pass 1: main short with speed-up, subtitles, hook overlay, voice, and music
+
     filter_complex_1 = (
         f"[0:v]"
         f"setpts=PTS/{SPEED},"
@@ -202,13 +220,14 @@ def render_video(bg: Path, voice: Path, subtitle: Path, output: Path, hook_overl
         f"fontfile='C\\:/Windows/Fonts/impact.ttf':"
         f"fontsize=76:"
         f"fontcolor={hook_color}:"
+        f"alpha='if(lt(t,{HOOK_FADE_IN}),t/{HOOK_FADE_IN},1)':"
         f"borderw=5:"
         f"bordercolor=black:"
         f"box=1:"
         f"boxcolor=black@0.20:"
         f"boxborderw=24:"
         f"x=(w-text_w)/2:"
-        f"y=140:"
+        f"y='if(lt(t,{HOOK_FADE_IN}),{HOOK_START_Y}+(({HOOK_END_Y}-{HOOK_START_Y})*(t/{HOOK_FADE_IN})),{HOOK_END_Y})':"
         f"enable='lte(t,{HOOK_DURATION})'"
         f"[v];"
         f"[1:a]atempo={SPEED},volume=1.0[a1];"
@@ -242,7 +261,6 @@ def render_video(bg: Path, voice: Path, subtitle: Path, output: Path, hook_overl
     duration = get_media_duration(temp_output)
     main_duration = max(duration - OUTRO_DURATION, 0.1)
 
-    # Pass 2: fade from main video into black logo outro
     filter_complex_2 = (
         f"[0:v]trim=0:{main_duration},setpts=PTS-STARTPTS,"
         f"fade=t=out:st={max(main_duration - FADE_DURATION, 0):.3f}:d={FADE_DURATION}[vmain];"
@@ -279,6 +297,7 @@ def render_video(bg: Path, voice: Path, subtitle: Path, output: Path, hook_overl
     if scaled_subtitle.exists():
         scaled_subtitle.unlink()
 
+
 def main():
     df = pd.read_excel(EXCEL_FILE)
     FINAL_FOLDER.mkdir(exist_ok=True)
@@ -298,6 +317,7 @@ def main():
 
         file_name = str(row.get("File Name", "")).strip()
         hook_overlay = str(row.get("Hook Overlay", "")).strip()
+        scene_type = str(row.get("Scene Type", "")).strip().lower()
 
         if not file_name:
             continue
@@ -334,8 +354,8 @@ def main():
             continue
 
         try:
-            bg = get_background()
-            print(f"Rendering {file_name} using {bg.name}")
+            bg = get_background(scene_type)
+            print(f"Rendering {file_name} using {bg.name} (scene_type={scene_type})")
             render_video(bg, voice, subtitle, output, hook_overlay)
 
             if output.exists() and output.stat().st_size > 0:
