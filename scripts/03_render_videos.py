@@ -5,6 +5,21 @@ import pandas as pd
 import tempfile
 import re
 
+HOOK_COLORS = [
+    "white",
+    "yellow",
+    "red",
+    "lime",
+    "cyan"
+]
+
+SUBTITLE_COLORS = [
+    "&HFFFFFF&",   # white
+    "&H00FFFF&",   # yellow
+    "&H00FF00&",   # green
+    "&HFFFF00&"    # cyan
+]
+
 def parse_srt_timestamp(ts: str) -> float:
     # "HH:MM:SS,mmm" -> seconds
     h, m, s_ms = ts.split(":")
@@ -108,13 +123,15 @@ def get_media_duration(path: Path) -> float:
 
 
 def pick_subtitle_style():
+    primary_color = random.choice(SUBTITLE_COLORS)
+
     styles = [
         {
             "font": "Arial",
             "size": 18,
             "margin_v": 120,
             "alignment": 2,
-            "primary": "&HFFFFFF&",
+            "primary": primary_color,
             "outline": "&H000000&",
             "back": "&H40000000&",
             "border": 3,
@@ -126,7 +143,7 @@ def pick_subtitle_style():
             "size": 20,
             "margin_v": 140,
             "alignment": 2,
-            "primary": "&H00FFFF&",
+            "primary": primary_color,
             "outline": "&H000000&",
             "back": "&H50000000&",
             "border": 3,
@@ -138,26 +155,15 @@ def pick_subtitle_style():
             "size": 19,
             "margin_v": 130,
             "alignment": 2,
-            "primary": "&HFFFFFF&",
+            "primary": primary_color,
             "outline": "&H202020&",
             "back": "&H60000000&",
             "border": 4,
             "outline_w": 1,
             "shadow": 0,
-        },
-        {
-            "font": "Arial",
-            "size": 21,
-            "margin_v": 150,
-            "alignment": 2,
-            "primary": "&H80FF00&",
-            "outline": "&H000000&",
-            "back": "&H45000000&",
-            "border": 3,
-            "outline_w": 2,
-            "shadow": 0,
-        },
+        }
     ]
+
     return random.choice(styles)
 
 
@@ -183,7 +189,8 @@ def render_video(bg: Path, voice: Path, subtitle: Path, output: Path, hook_overl
 
     subtitle_style = build_subtitle_style(pick_subtitle_style())
     hook_text = escape_drawtext(hook_overlay)
-
+    hook_color = random.choice(HOOK_COLORS)
+    
     # Pass 1: main short with speed-up, subtitles, hook overlay, voice, and music
     filter_complex_1 = (
         f"[0:v]"
@@ -194,7 +201,7 @@ def render_video(bg: Path, voice: Path, subtitle: Path, output: Path, hook_overl
         f"drawtext=text='{hook_text}':"
         f"fontfile='C\\:/Windows/Fonts/impact.ttf':"
         f"fontsize=76:"
-        f"fontcolor=Red:"
+        f"fontcolor={hook_color}:"
         f"borderw=5:"
         f"bordercolor=black:"
         f"box=1:"
