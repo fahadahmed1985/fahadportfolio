@@ -86,7 +86,7 @@ LOGO_FILE = Path("assets/logo.png")
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPROBE = r"C:\ffmpeg\bin\ffprobe.exe"
 
-MAX_ROWS = 1
+MAX_ROWS = 3
 SPEED = 1.10
 OUTRO_DURATION = 1.0
 FADE_DURATION = 0.5
@@ -95,18 +95,33 @@ FADE_DURATION = 0.5
 def get_background(scene_type: str) -> Path:
     scene_type = str(scene_type).strip().lower()
 
-    background_file = SCENE_BACKGROUNDS.get(scene_type)
+    if scene_type == "sunrise":
+        scene_type = "mountain"
 
+    matching_files = sorted(BG_FOLDER.glob(f"{scene_type}_*.mp4"))
+
+    print(f"Scene type: {scene_type}")
+    print("Matching files:", [f.name for f in matching_files])
+
+    if matching_files:
+        chosen = random.choice(matching_files)
+        print(f"Chosen background: {chosen.name}")
+        return chosen
+
+    background_file = SCENE_BACKGROUNDS.get(scene_type)
     if background_file:
         bg_path = BG_FOLDER / background_file
         if bg_path.exists():
+            print(f"Fallback background: {bg_path.name}")
             return bg_path
 
-    # fallback to random if scene type missing or file not found
     videos = list(BG_FOLDER.glob("*.mp4"))
     if not videos:
         raise FileNotFoundError("No background videos found in backgrounds/")
-    return random.choice(videos)
+
+    chosen = random.choice(videos)
+    print(f"Random fallback background: {chosen.name}")
+    return chosen
 
 
 def subtitle_filter_path(path: Path) -> str:
