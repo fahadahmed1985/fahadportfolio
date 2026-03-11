@@ -2,6 +2,52 @@ import subprocess
 import random
 from pathlib import Path
 import pandas as pd
+import tempfile
+import re
+
+def parse_srt_timestamp(ts: str) -> float:
+    # "HH:MM:SS,mmm" -> seconds
+    h, m, s_ms = ts.split(":")
+    s, ms = s_ms.split(",")
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+
+def format_srt_timestamp(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0
+    total_ms = int(round(seconds * 1000))
+    h = total_ms // 3_600_000
+    total_ms %= 3_600_000
+    m = total_ms // 60_000
+    total_ms %= 60_000
+    s = total_ms // 1000
+    ms = total_ms % 1000
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+
+def scale_srt_file(input_srt: Path, speed: float) -> Path:
+    """
+    Adjust subtitle timings to match sped-up audio/video.
+    If speed = 1.10, subtitle timestamps should be divided by 1.10.
+    """
+    with input_srt.open("r", encoding="utf-8") as f:
+        content = f.read()
+
+    pattern = re.compile(r"(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})")
+
+    def repl(match):
+        start = parse_srt_timestamp(match.group(1)) / speed
+        end = parse_srt_timestamp(match.group(2)) / speed
+        return f"{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}"
+
+    scaled_content = pattern.sub(repl, content)
+
+    temp_srt = Path(tempfile.gettempdir()) / f"{input_srt.stem}_scaled.srt"
+    with temp_srt.open("w", encoding="utf-8") as f:
+        f.write(scaled_content)
+
+    return temp_srt
+
 
 EXCEL_FILE = Path("data/EM_pipeline_100.xlsx")
 
@@ -15,10 +61,11 @@ LOGO_FILE = Path("assets/logo.png")
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPROBE = r"C:\ffmpeg\bin\ffprobe.exe"
 
-MAX_ROWS = 1          # test first
+MAX_ROWS = 1           # test first
 SPEED = 1.10
 OUTRO_DURATION = 1.0
 FADE_DURATION = 0.5
+HOOK_DURATION = 2.0
 
 
 def get_background():
@@ -31,6 +78,21 @@ def get_background():
 def subtitle_filter_path(path: Path) -> str:
     p = path.resolve().as_posix()
     return p.replace(":", r"\:")
+
+
+def escape_drawtext(text: str) -> str:
+    if not text:
+        return ""
+    return (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace(":", r"\:")
+        .replace("'", r"\'")
+        .replace(",", r"\,")
+        .replace("[", r"\[")
+        .replace("]", r"\]")
+        .replace("%", r"\%")
+    )
 
 
 def get_media_duration(path: Path) -> float:
@@ -79,7 +141,7 @@ def pick_subtitle_style():
             "primary": "&HFFFFFF&",
             "outline": "&H202020&",
             "back": "&H60000000&",
-            "border": 4,  # boxed look
+            "border": 4,
             "outline_w": 1,
             "shadow": 0,
         },
@@ -114,19 +176,33 @@ def build_subtitle_style(style: dict) -> str:
     )
 
 
-def render_video(bg: Path, voice: Path, subtitle: Path, output: Path):
-    subtitle_path = subtitle_filter_path(subtitle)
+def render_video(bg: Path, voice: Path, subtitle: Path, output: Path, hook_overlay: str):
+    scaled_subtitle = scale_srt_file(subtitle, SPEED)
+    subtitle_path = subtitle_filter_path(scaled_subtitle)
     temp_output = output.with_name(output.stem + "_temp.mp4")
 
     subtitle_style = build_subtitle_style(pick_subtitle_style())
+    hook_text = escape_drawtext(hook_overlay)
 
-    # Pass 1: main short with speed-up, subtitles, voice, and music
+    # Pass 1: main short with speed-up, subtitles, hook overlay, voice, and music
     filter_complex_1 = (
         f"[0:v]"
         f"setpts=PTS/{SPEED},"
         f"scale=1080:1920:force_original_aspect_ratio=increase,"
         f"crop=1080:1920,"
-        f"subtitles='{subtitle_path}':force_style='{subtitle_style}'"
+        f"subtitles='{subtitle_path}':force_style='{subtitle_style}',"
+        f"drawtext=text='{hook_text}':"
+        f"fontfile='C\\:/Windows/Fonts/impact.ttf':"
+        f"fontsize=76:"
+        f"fontcolor=Red:"
+        f"borderw=5:"
+        f"bordercolor=black:"
+        f"box=1:"
+        f"boxcolor=black@0.20:"
+        f"boxborderw=24:"
+        f"x=(w-text_w)/2:"
+        f"y=140:"
+        f"enable='lte(t,{HOOK_DURATION})'"
         f"[v];"
         f"[1:a]atempo={SPEED},volume=1.0[a1];"
         f"[2:a]atempo={SPEED},volume=0.10[a2];"
@@ -160,12 +236,11 @@ def render_video(bg: Path, voice: Path, subtitle: Path, output: Path):
     main_duration = max(duration - OUTRO_DURATION, 0.1)
 
     # Pass 2: fade from main video into black logo outro
-    # We trim main section, fade it out, then fade in black outro with centered logo.
     filter_complex_2 = (
         f"[0:v]trim=0:{main_duration},setpts=PTS-STARTPTS,"
         f"fade=t=out:st={max(main_duration - FADE_DURATION, 0):.3f}:d={FADE_DURATION}[vmain];"
         f"color=c=black:s=1080x1920:d={OUTRO_DURATION}[black];"
-        f"[1:v]scale=640:-1[logo];"
+        f"[1:v]scale=360:-1[logo];"
         f"[black][logo]overlay=(W-w)/2:(H-h)/2,"
         f"fade=t=in:st=0:d={FADE_DURATION}[voutro];"
         f"[vmain][voutro]concat=n=2:v=1:a=0[vfinal];"
@@ -194,6 +269,8 @@ def render_video(bg: Path, voice: Path, subtitle: Path, output: Path):
     if temp_output.exists():
         temp_output.unlink()
 
+    if scaled_subtitle.exists():
+        scaled_subtitle.unlink()
 
 def main():
     df = pd.read_excel(EXCEL_FILE)
@@ -213,8 +290,13 @@ def main():
             break
 
         file_name = str(row.get("File Name", "")).strip()
+        hook_overlay = str(row.get("Hook Overlay", "")).strip()
+
         if not file_name:
             continue
+
+        if not hook_overlay:
+            hook_overlay = str(row.get("Title", "")).strip()
 
         voice = VOICE_FOLDER / f"{file_name}.mp3"
         subtitle = SUB_FOLDER / f"{file_name}.srt"
@@ -247,7 +329,7 @@ def main():
         try:
             bg = get_background()
             print(f"Rendering {file_name} using {bg.name}")
-            render_video(bg, voice, subtitle, output)
+            render_video(bg, voice, subtitle, output, hook_overlay)
 
             if output.exists() and output.stat().st_size > 0:
                 df.at[i, "Status"] = "video_done"
