@@ -21,3 +21,36 @@ Extract to:
 C:\ffmpeg
 
 Verify installation
+ffmpeg -version
+
+
+---
+
+# 3 Create Virtual Environment
+python -m venv .venv
+
+
+Activate
+.venv\Scripts\activate
+
+
+---
+
+# 4 Install Dependencies
+pip install pandas openpyxl edge-tts faster-whisper
+
+
+---
+
+# 5 Run Automation
+python scripts/01_generate_voice.py
+python scripts/02_generate_subtitles.py
+python scripts/03_render_videos.py
+
+
+---
+
+# Output
+
+Final rendered videos will appear in:
+final/
