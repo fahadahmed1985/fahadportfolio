@@ -92,7 +92,7 @@ OUTRO_DURATION = 1.0
 FADE_DURATION = 0.5
 
 
-def get_background(scene_type: str) -> Path:
+def get_background_sequence(scene_type: str, count: int = 2) -> list[Path]:
     scene_type = str(scene_type).strip().lower()
 
     if scene_type == "sunrise":
@@ -100,28 +100,37 @@ def get_background(scene_type: str) -> Path:
 
     matching_files = sorted(BG_FOLDER.glob(f"{scene_type}_*.mp4"))
 
-    print(f"Scene type: {scene_type}")
-    print("Matching files:", [f.name for f in matching_files])
+    if len(matching_files) >= count:
+        return random.sample(matching_files, count)
 
-    if matching_files:
-        chosen = random.choice(matching_files)
-        print(f"Chosen background: {chosen.name}")
-        return chosen
+    if len(matching_files) == 1:
+        # fill the rest from all other backgrounds
+        all_videos = sorted(BG_FOLDER.glob("*.mp4"))
+        others = [v for v in all_videos if v != matching_files[0]]
+        if others:
+            return [matching_files[0], random.choice(others)]
+        return [matching_files[0], matching_files[0]]
 
+    # fallback to old single-file mapping
     background_file = SCENE_BACKGROUNDS.get(scene_type)
     if background_file:
         bg_path = BG_FOLDER / background_file
         if bg_path.exists():
-            print(f"Fallback background: {bg_path.name}")
-            return bg_path
+            all_videos = sorted(BG_FOLDER.glob("*.mp4"))
+            others = [v for v in all_videos if v != bg_path]
+            if others:
+                return [bg_path, random.choice(others)]
+            return [bg_path, bg_path]
 
-    videos = list(BG_FOLDER.glob("*.mp4"))
+    # final fallback: pick any two
+    videos = sorted(BG_FOLDER.glob("*.mp4"))
     if not videos:
         raise FileNotFoundError("No background videos found in backgrounds/")
 
-    chosen = random.choice(videos)
-    print(f"Random fallback background: {chosen.name}")
-    return chosen
+    if len(videos) == 1:
+        return [videos[0], videos[0]]
+
+    return random.sample(videos, 2)
 
 
 def subtitle_filter_path(path: Path) -> str:
@@ -216,7 +225,9 @@ def build_subtitle_style(style: dict) -> str:
     )
 
 
-def render_video(bg: Path, voice: Path, subtitle: Path, output: Path, hook_overlay: str):
+def render_video(bg_files: list[Path], voice: Path, subtitle: Path, output: Path, hook_overlay: str):
+    bg1, bg2 = bg_files
+
     scaled_subtitle = scale_srt_file(subtitle, SPEED)
     subtitle_path = subtitle_filter_path(scaled_subtitle)
     temp_output = output.with_name(output.stem + "_temp.mp4")
@@ -225,12 +236,22 @@ def render_video(bg: Path, voice: Path, subtitle: Path, output: Path, hook_overl
     hook_text = escape_drawtext(hook_overlay)
     hook_color = random.choice(HOOK_COLORS)
 
+    # Estimate final main duration from sped-up voice
+    voice_duration = get_media_duration(voice) / SPEED
+    seg1_final = round(voice_duration * 0.45, 3)
+    seg2_final = round(max(voice_duration - seg1_final, 0.5), 3)
+
+    # Because video is sped up visually, trim slightly longer source segments
+    seg1_src = round(seg1_final * SPEED, 3)
+    seg2_src = round(seg2_final * SPEED, 3)
+
     filter_complex_1 = (
-        f"[0:v]"
-        f"setpts=PTS/{SPEED},"
-        f"scale=1080:1920:force_original_aspect_ratio=increase,"
-        f"crop=1080:1920,"
-        f"subtitles='{subtitle_path}':force_style='{subtitle_style}',"
+        f"[0:v]trim=0:{seg1_src},setpts=PTS-STARTPTS,setpts=PTS/{SPEED},"
+        f"scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[vbg1];"
+        f"[1:v]trim=0:{seg2_src},setpts=PTS-STARTPTS,setpts=PTS/{SPEED},"
+        f"scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[vbg2];"
+        f"[vbg1][vbg2]concat=n=2:v=1:a=0[vbase];"
+        f"[vbase]subtitles='{subtitle_path}':force_style='{subtitle_style}',"
         f"drawtext=text='{hook_text}':"
         f"fontfile='C\\:/Windows/Fonts/impact.ttf':"
         f"fontsize=76:"
@@ -243,10 +264,9 @@ def render_video(bg: Path, voice: Path, subtitle: Path, output: Path, hook_overl
         f"boxborderw=24:"
         f"x=(w-text_w)/2:"
         f"y='if(lt(t,{HOOK_FADE_IN}),{HOOK_START_Y}+(({HOOK_END_Y}-{HOOK_START_Y})*(t/{HOOK_FADE_IN})),{HOOK_END_Y})':"
-        f"enable='lte(t,{HOOK_DURATION})'"
-        f"[v];"
-        f"[1:a]atempo={SPEED},volume=1.0[a1];"
-        f"[2:a]atempo={SPEED},volume=0.10[a2];"
+        f"enable='lte(t,{HOOK_DURATION})'[v];"
+        f"[2:a]atempo={SPEED},volume=1.0[a1];"
+        f"[3:a]atempo={SPEED},volume=0.10[a2];"
         f"[a1][a2]amix=inputs=2:duration=first:dropout_transition=2[aout]"
     )
 
@@ -254,7 +274,9 @@ def render_video(bg: Path, voice: Path, subtitle: Path, output: Path, hook_overl
         FFMPEG,
         "-y",
         "-stream_loop", "-1",
-        "-i", str(bg),
+        "-i", str(bg1),
+        "-stream_loop", "-1",
+        "-i", str(bg2),
         "-i", str(voice),
         "-i", str(MUSIC_FILE),
         "-filter_complex", filter_complex_1,
@@ -369,9 +391,13 @@ def main():
             continue
 
         try:
-            bg = get_background(scene_type)
-            print(f"Rendering {file_name} using {bg.name} (scene_type={scene_type})")
-            render_video(bg, voice, subtitle, output, hook_overlay)
+            bg_files = get_background_sequence(scene_type, count=2)
+            print(
+                f"Rendering {file_name} using "
+                f"{bg_files[0].name} + {bg_files[1].name} "
+                f"(scene_type={scene_type})"
+            )
+            render_video(bg_files, voice, subtitle, output, hook_overlay)
 
             if output.exists() and output.stat().st_size > 0:
                 df.at[i, "Status"] = "video_done"
