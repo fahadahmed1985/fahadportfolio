@@ -21,7 +21,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
 ]
 
-MAX_ROWS = 1  # test first, increase later
+MAX_ROWS = 20  # test first, increase later
 YOUTUBE_CATEGORY_ID = "22"  # People & Blogs
 
 

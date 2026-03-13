@@ -86,7 +86,7 @@ LOGO_FILE = Path("assets/logo.png")
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPROBE = r"C:\ffmpeg\bin\ffprobe.exe"
 
-MAX_ROWS = 3
+MAX_ROWS = 20
 SPEED = 1.10
 OUTRO_DURATION = 1.0
 FADE_DURATION = 0.5
