@@ -11,7 +11,7 @@ def expand_paragraph(text: str) -> str:
 
     additions = [
         "This matters more than most people realize because the same pattern repeats quietly in everyday life.",
-        "The people who understand this early usually move with more clarity, more patience, and more control.",
+        "The people who understand this early usually move with more clarity, patience, and control.",
         "What seems small in the moment often becomes powerful when repeated long enough.",
     ]
 
@@ -49,7 +49,7 @@ def main():
         "Takeaway", "CTA", "Full Script",
         "Voice File", "Subtitle File", "Video File", "Thumbnail File",
         "Description", "Tags", "Publish Date", "Publish Time",
-        "Status", "YouTube URL"
+        "Status", "YouTube URL", "Comment Question"
     ]
 
     for col in text_columns:

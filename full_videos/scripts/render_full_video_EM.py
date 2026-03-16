@@ -1,7 +1,6 @@
 import asyncio
 import json
 import random
-import re
 import shutil
 import subprocess
 import textwrap
@@ -9,25 +8,25 @@ from pathlib import Path
 
 import edge_tts
 import pandas as pd
+from PIL import Image, ImageDraw, ImageFont
 
 EXCEL_FILE = Path("data/EM_full_videos_pipeline.xlsx")
 
 SCENE_FOLDER = Path("full_videos/scenes")
-SUB_FOLDER = Path("full_videos/subtitles")
-BG_ROOT = Path("full_videos/backgrounds_full")
 FINAL_FOLDER = Path("full_videos/final")
 ASSET_FOLDER = Path("full_videos/assets")
 MUSIC_FOLDER = Path("full_videos/music")
+BG_ROOT = Path("full_videos/backgrounds_full")
 
 FFMPEG = r"C:\ffmpeg\bin\ffmpeg.exe"
 FFPROBE = r"C:\ffmpeg\bin\ffprobe.exe"
 
 MAX_ROWS = 1
-INTRO_DURATION = 2.0
-SCENE_FADE = 0.35
+INTRO_DURATION = 2.2
 OUTRO_PAUSE = 0.8
 RESOLUTION = (1920, 1080)
 FPS = 30
+MUSIC_VOLUME = 0.16
 
 VOICE_NAME = "en-GB-SoniaNeural"
 VOICE_RATE = "-10%"
@@ -50,6 +49,11 @@ def get_duration(path: Path) -> float:
     return float(out)
 
 
+def cleanup_temp_dir(temp_dir: Path):
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def find_background_clip(category: str) -> Path:
     category = str(category or "").strip().lower()
     folder = BG_ROOT / category
@@ -68,66 +72,168 @@ def find_background_clip(category: str) -> Path:
     raise FileNotFoundError(f"No background clips found for category '{category}' or fallback folders.")
 
 
-def escape_subtitle_path(path: Path) -> str:
-    return path.resolve().as_posix().replace(":", r"\:")
+def get_font(font_size: int, bold=False):
+    font_candidates = [
+        "C:/Windows/Fonts/georgiab.ttf",
+        "C:/Windows/Fonts/georgia.ttf",
+        "C:/Windows/Fonts/timesbd.ttf",
+        "C:/Windows/Fonts/times.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+    ]
+    for fp in font_candidates:
+        if Path(fp).exists():
+            try:
+                return ImageFont.truetype(fp, font_size)
+            except Exception:
+                pass
+    return ImageFont.load_default()
 
 
-def escape_drawtext_text(text: str) -> str:
-    text = str(text or "")
-    return (
-        text.replace("\\", "\\\\")
-        .replace(":", r"\:")
-        .replace("'", r"\'")
-        .replace(",", r"\,")
-        .replace("[", r"\[")
-        .replace("]", r"\]")
-        .replace("%", r"\%")
-    )
+def wrap_for_image(draw, text, font, max_width):
+    words = str(text or "").split()
+    lines = []
+    current = ""
+
+    for word in words:
+        test = word if not current else current + " " + word
+        bbox = draw.textbbox((0, 0), test, font=font)
+        width = bbox[2] - bbox[0]
+        if width <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+
+    if current:
+        lines.append(current)
+
+    return lines
 
 
-def wrap_text_for_drawtext(text: str, width: int = 26) -> str:
-    text = str(text or "").strip()
-    wrapped = textwrap.fill(text, width=width)
-    return escape_drawtext_text(wrapped).replace("\n", r"\n")
+def draw_multiline_centered(draw, lines, font, fill, y_start, image_width, line_spacing=18, stroke_width=3):
+    y = y_start
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke_width)
+        text_width = bbox[2] - bbox[0]
+        x = (image_width - text_width) / 2
+        draw.text(
+            (x, y),
+            line,
+            font=font,
+            fill=fill,
+            stroke_width=stroke_width,
+            stroke_fill="black"
+        )
+        y += (bbox[3] - bbox[1]) + line_spacing
 
 
-def wrap_text_for_drawtext_small(text: str, width: int = 42) -> str:
-    text = str(text or "").strip()
-    wrapped = textwrap.fill(text, width=width)
-    return escape_drawtext_text(wrapped).replace("\n", r"\n")
-
-
-def cleanup_temp_dir(temp_dir: Path):
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-def create_scene_clip(source_clip: Path, duration: float, output_clip: Path):
+def build_intro_image(hook_text: str, output_path: Path):
     width, height = RESOLUTION
+    img = Image.new("RGB", (width, height), "black")
+    draw = ImageDraw.Draw(img)
 
-    source_duration = get_duration(source_clip)
-    max_start = max(0, source_duration - duration - 0.5)
+    font = get_font(68, bold=True)
+    max_width = width - 300
+    lines = wrap_for_image(draw, hook_text, font, max_width)
 
-    start_offset = 0
-    if max_start > 0:
-        start_offset = round(random.uniform(0, max_start), 2)
+    total_height = 0
+    heights = []
+    for line in lines:
+        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=3)
+        h = bbox[3] - bbox[1]
+        heights.append(h)
+        total_height += h
+    total_height += (len(lines) - 1) * 18
 
-    zoom_style = random.choice(["normal", "slight_zoom"])
+    y_start = (height - total_height) / 2
 
-    if zoom_style == "slight_zoom":
+    draw_multiline_centered(
+        draw, lines, font, "white",
+        y_start=y_start,
+        image_width=width,
+        line_spacing=18,
+        stroke_width=3
+    )
+    img.save(output_path)
+
+
+def build_outro_image(summary_text: str, question_text: str, output_path: Path):
+    width, height = RESOLUTION
+    img = Image.new("RGB", (width, height), "black")
+    draw = ImageDraw.Draw(img)
+
+    logo = ASSET_FOLDER / "logo.png"
+    if logo.exists():
+        logo_img = Image.open(logo).convert("RGBA")
+        logo_img.thumbnail((210, 210))
+        lx = (width - logo_img.width) // 2
+        ly = 35
+        img.paste(logo_img, (lx, ly), logo_img)
+
+    summary_font = get_font(30, bold=True)
+    question_font = get_font(50, bold=True)
+    sub_font = get_font(24, bold=False)
+
+    summary_lines = wrap_for_image(draw, summary_text, summary_font, width - 340)
+    question_lines = wrap_for_image(draw, question_text, question_font, width - 280)
+    subscribe_text = "Please like and subscribe to my channel for motivational and inspirational topics."
+    subscribe_lines = wrap_for_image(draw, subscribe_text, sub_font, width - 340)
+
+    draw_multiline_centered(draw, summary_lines, summary_font, "white", 210, width, line_spacing=12, stroke_width=2)
+    draw_multiline_centered(draw, question_lines, question_font, "#FFD84D", 340, width, line_spacing=16, stroke_width=2)
+    draw_multiline_centered(draw, subscribe_lines, sub_font, "white", 760, width, line_spacing=10, stroke_width=2)
+
+    img.save(output_path)
+
+
+def create_cinematic_still_video(image_path: Path, duration: float, output_path: Path, fade=True):
+    width, height = RESOLUTION
+    vf = (
+        f"scale={width}:{height},"
+        f"zoompan=z='min(zoom+0.0005,1.06)':d=1:s={width}x{height}:fps={FPS}"
+    )
+    if fade:
+        vf += ",fade=t=in:st=0:d=0.5,fade=t=out:st=1.5:d=0.6"
+
+    cmd = [
+        FFMPEG,
+        "-y",
+        "-loop", "1",
+        "-i", str(image_path),
+        "-t", str(duration),
+        "-vf", vf,
+        "-r", str(FPS),
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        str(output_path)
+    ]
+    run_cmd(cmd)
+
+
+def create_scene_clip(source_clip: Path, start_offset: float, duration: float, output_clip: Path):
+    width, height = RESOLUTION
+    motion_style = random.choice(["slow_zoom_in", "slow_zoom_out", "static_crop"])
+
+    if motion_style == "slow_zoom_in":
         vf = (
             f"scale={width}:{height}:force_original_aspect_ratio=increase,"
             f"crop={width}:{height},"
-            f"zoompan=z='min(zoom+0.0008,1.08)':d=1:s={width}x{height}:fps={FPS},"
-            f"fade=t=in:st=0:d={SCENE_FADE},"
-            f"fade=t=out:st={max(duration - SCENE_FADE, 0):.2f}:d={SCENE_FADE}"
+            f"zoompan=z='min(zoom+0.0007,1.08)':d=1:s={width}x{height}:fps={FPS}"
+        )
+    elif motion_style == "slow_zoom_out":
+        vf = (
+            f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},"
+            f"zoompan=z='if(lte(on,1),1.08,max(1.0,zoom-0.0007))':d=1:s={width}x{height}:fps={FPS}"
         )
     else:
         vf = (
             f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},"
-            f"fade=t=in:st=0:d={SCENE_FADE},"
-            f"fade=t=out:st={max(duration - SCENE_FADE, 0):.2f}:d={SCENE_FADE}"
+            f"crop={width}:{height}"
         )
 
     cmd = [
@@ -142,142 +248,17 @@ def create_scene_clip(source_clip: Path, duration: float, output_clip: Path):
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", "23",
+        "-pix_fmt", "yuv420p",
         "-an",
         str(output_clip)
     ]
     run_cmd(cmd)
 
 
-def create_concat_file(scene_clips, concat_file: Path):
+def create_concat_file(clips, concat_file: Path):
     with open(concat_file, "w", encoding="utf-8") as f:
-        for clip in scene_clips:
+        for clip in clips:
             f.write(f"file '{clip.resolve().as_posix()}'\n")
-
-
-def build_intro_clip(hook_text: str, output_path: Path):
-    width, height = RESOLUTION
-    safe_text = wrap_text_for_drawtext(hook_text, width=24)
-
-    vf = (
-        "fade=t=in:st=0:d=0.5,"
-        "fade=t=out:st=1.4:d=0.6,"
-        "drawtext="
-        "fontfile='C\\:/Windows/Fonts/impact.ttf':"
-        f"text='{safe_text}':"
-        "fontcolor=white:"
-        "fontsize=62:"
-        "line_spacing=18:"
-        "x=(w-text_w)/2:"
-        "y=(h-text_h)/2:"
-        "borderw=4:"
-        "bordercolor=black:"
-        "box=1:"
-        "boxcolor=black@0.22:"
-        "boxborderw=35:"
-        "fix_bounds=true"
-    )
-
-    cmd = [
-        FFMPEG,
-        "-y",
-        "-f", "lavfi",
-        "-i", f"color=c=black:s={width}x{height}:d={INTRO_DURATION}",
-        "-vf", vf,
-        "-r", str(FPS),
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-an",
-        str(output_path)
-    ]
-    run_cmd(cmd)
-
-
-def build_outro_clip(summary_text: str, question_text: str, output_path: Path, duration: float):
-    width, height = RESOLUTION
-    logo = ASSET_FOLDER / "logo.png"
-
-    safe_summary = wrap_text_for_drawtext_small(summary_text, width=40)
-    safe_question = wrap_text_for_drawtext_small(question_text, width=38)
-    subscribe_line = wrap_text_for_drawtext_small(
-        "Please like and subscribe to my channel for motivational and inspirational topics.",
-        width=50
-    )
-
-    inputs = [
-        "-f", "lavfi",
-        "-i", f"color=c=black:s={width}x{height}:d={duration}"
-    ]
-
-    filter_graph = "[0:v]format=yuv420p[base];"
-    current = "base"
-
-    if logo.exists():
-        inputs.extend(["-i", str(logo)])
-        filter_graph += "[1:v]scale=220:-1[logo];"
-        filter_graph += f"[{current}][logo]overlay=(W-w)/2:60[tmp1];"
-        current = "tmp1"
-
-    filter_graph += (
-        f"[{current}]drawtext="
-        "fontfile='C\\:/Windows/Fonts/arialbd.ttf':"
-        f"text='{safe_summary}':"
-        "fontcolor=white:"
-        "fontsize=30:"
-        "line_spacing=10:"
-        "x=(w-text_w)/2:"
-        "y=230:"
-        "borderw=3:"
-        "bordercolor=black:"
-        "box=1:"
-        "boxcolor=black@0.18:"
-        "boxborderw=24:"
-        "fix_bounds=true,"
-        "drawtext="
-        "fontfile='C\\:/Windows/Fonts/arialbd.ttf':"
-        f"text='{safe_question}':"
-        "fontcolor=yellow:"
-        "fontsize=34:"
-        "line_spacing=12:"
-        "x=(w-text_w)/2:"
-        "y=390:"
-        "borderw=3:"
-        "bordercolor=black:"
-        "box=1:"
-        "boxcolor=black@0.18:"
-        "boxborderw=24:"
-        "fix_bounds=true,"
-        "drawtext="
-        "fontfile='C\\:/Windows/Fonts/arial.ttf':"
-        f"text='{subscribe_line}':"
-        "fontcolor=white:"
-        "fontsize=24:"
-        "line_spacing=8:"
-        "x=(w-text_w)/2:"
-        "y=585:"
-        "borderw=2:"
-        "bordercolor=black:"
-        "box=1:"
-        "boxcolor=black@0.12:"
-        "boxborderw=18:"
-        "fix_bounds=true[vout]"
-    )
-
-    cmd = [
-        FFMPEG,
-        "-y",
-        *inputs,
-        "-filter_complex", filter_graph,
-        "-map", "[vout]",
-        "-t", str(duration),
-        "-r", str(FPS),
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
-        "-an",
-        str(output_path)
-    ]
-    run_cmd(cmd)
 
 
 async def tts_save(text: str, output_path: Path):
@@ -301,9 +282,7 @@ def parse_srt_timestamp(ts: str) -> float:
 
 
 def format_srt_timestamp(seconds: float) -> str:
-    if seconds < 0:
-        seconds = 0
-    total_ms = int(round(seconds * 1000))
+    total_ms = int(round(max(seconds, 0) * 1000))
     h = total_ms // 3_600_000
     total_ms %= 3_600_000
     m = total_ms // 60_000
@@ -314,20 +293,89 @@ def format_srt_timestamp(seconds: float) -> str:
 
 
 def shift_srt(input_srt: Path, output_srt: Path, offset_sec: float):
-    pattern = re.compile(r"(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})")
+    lines = input_srt.read_text(encoding="utf-8").splitlines()
+    new_lines = []
 
-    with open(input_srt, "r", encoding="utf-8") as f:
-        content = f.read()
+    for line in lines:
+        if " --> " in line:
+            start_ts, end_ts = line.split(" --> ")
+            start = parse_srt_timestamp(start_ts) + offset_sec
+            end = parse_srt_timestamp(end_ts) + offset_sec
+            new_lines.append(f"{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}")
+        else:
+            new_lines.append(line)
 
-    def repl(match):
-        start = parse_srt_timestamp(match.group(1)) + offset_sec
-        end = parse_srt_timestamp(match.group(2)) + offset_sec
-        return f"{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}"
+    output_srt.write_text("\n".join(new_lines), encoding="utf-8")
 
-    shifted = pattern.sub(repl, content)
 
-    with open(output_srt, "w", encoding="utf-8") as f:
-        f.write(shifted)
+def build_outro_clip(summary_text: str, question_text: str, output_path: Path, duration: float):
+    outro_png = output_path.with_suffix(".png")
+    build_outro_image(summary_text, question_text, outro_png)
+
+    like_icon = ASSET_FOLDER / "like.png"
+    comment_icon = ASSET_FOLDER / "comment.png"
+    subscribe_icon = ASSET_FOLDER / "subscribe.png"
+
+    cmd = [
+        FFMPEG,
+        "-y",
+        "-loop", "1",
+        "-i", str(outro_png),
+    ]
+
+    icon_inputs = []
+    input_idx = 1
+    for icon_path in [like_icon, comment_icon, subscribe_icon]:
+        if icon_path.exists():
+            cmd.extend(["-loop", "1", "-i", str(icon_path)])
+            icon_inputs.append(input_idx)
+            input_idx += 1
+
+    filter_parts = []
+    filter_parts.append(
+        f"[0:v]scale={RESOLUTION[0]}:{RESOLUTION[1]},"
+        f"zoompan=z='min(zoom+0.0004,1.04)':d=1:s={RESOLUTION[0]}x{RESOLUTION[1]}:fps={FPS}[base]"
+    )
+
+    current = "base"
+    positions = [RESOLUTION[0] // 2 - 140, RESOLUTION[0] // 2 - 32, RESOLUTION[0] // 2 + 76]
+    y = 645
+
+    for n, idx in enumerate(icon_inputs):
+        icon_label = f"icon{n}"
+        out_label = f"tmp{n}"
+        x = positions[n] if n < len(positions) else RESOLUTION[0] // 2
+
+        filter_parts.append(
+            f"[{idx}:v]format=rgba,scale=72:72,"
+            f"fade=t=in:st={0.8 + n*0.22}:d=0.30:alpha=1[{icon_label}]"
+        )
+        filter_parts.append(
+            f"[{current}][{icon_label}]overlay="
+            f"x={x}:y={y}:enable='between(t,{0.75 + n*0.22},{duration})'"
+            f"[{out_label}]"
+        )
+        current = out_label
+
+    filter_complex = ";".join(filter_parts)
+
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-map", f"[{current}]",
+        "-t", str(duration),
+        "-r", str(FPS),
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-an",
+        str(output_path)
+    ])
+
+    run_cmd(cmd)
+
+    if outro_png.exists():
+        outro_png.unlink()
 
 
 def main():
@@ -348,7 +396,6 @@ def main():
 
     for i, row in df.iterrows():
         status = str(row.get("Status", "")).strip().lower()
-
         if status != "scene_plan_done":
             continue
 
@@ -358,9 +405,7 @@ def main():
         video_id = int(row.get("ID"))
         hook_text = str(row.get("Hook", "") or "").strip()
         takeaway = str(row.get("Takeaway", "") or "").strip()
-        comment_question = str(
-            row.get("Comment Question", "") or "Which point are you trying first?"
-        ).strip()
+        comment_question = str(row.get("Comment Question", "") or "Which point are you trying first?").strip()
 
         voice_file = Path(str(row.get("Voice File", "")).strip())
         subtitle_file = Path(str(row.get("Subtitle File", "")).strip())
@@ -368,51 +413,43 @@ def main():
 
         temp_dir = FINAL_FOLDER / f"temp_full_video_{video_id:03d}"
 
-        if not voice_file.exists():
-            print(f"Missing voice file for row {i+2}")
-            failed += 1
-            processed += 1
-            continue
-
-        if not subtitle_file.exists():
-            print(f"Missing subtitle file for row {i+2}")
-            failed += 1
-            processed += 1
-            continue
-
-        if not scene_plan_file.exists():
-            print(f"Missing scene plan file for row {i+2}")
+        if not voice_file.exists() or not subtitle_file.exists() or not scene_plan_file.exists():
+            print(f"Missing required file(s) for row {i+2}")
             failed += 1
             processed += 1
             continue
 
         try:
+            temp_dir.mkdir(parents=True, exist_ok=True)
+
             with open(scene_plan_file, "r", encoding="utf-8") as f:
                 scene_plan = json.load(f)
 
-            scene_clips = []
-            temp_dir.mkdir(parents=True, exist_ok=True)
+            clips = []
 
-            intro_clip = temp_dir / "intro.mp4"
-            build_intro_clip(hook_text, intro_clip)
-            scene_clips.append(intro_clip)
+            intro_png = temp_dir / "intro.png"
+            intro_mp4 = temp_dir / "intro.mp4"
+            build_intro_image(hook_text, intro_png)
+            create_cinematic_still_video(intro_png, INTRO_DURATION, intro_mp4, fade=True)
+            clips.append(intro_mp4)
 
             for scene in scene_plan["scenes"]:
                 category = scene["category"]
                 duration = float(scene["duration_sec"])
                 bg_clip = find_background_clip(category)
 
-                out_clip = temp_dir / f"scene_{scene['scene_number']:03d}.mp4"
-                create_scene_clip(bg_clip, duration, out_clip)
-                scene_clips.append(out_clip)
+                bg_duration = get_duration(bg_clip)
+                max_start = max(0, bg_duration - duration - 0.5)
+                start_offset = round(random.uniform(0, max_start), 2) if max_start > 0 else 0
 
-            # Outro voice generation
+                scene_out = temp_dir / f"scene_{scene['scene_number']:03d}.mp4"
+                create_scene_clip(bg_clip, start_offset, duration, scene_out)
+                clips.append(scene_out)
+
             outro_question_audio = temp_dir / "outro_question.mp3"
             outro_subscribe_audio = temp_dir / "outro_subscribe.mp3"
 
-            subscribe_voice_text = (
-                "Please like and subscribe to my channel for motivational and inspirational topics."
-            )
+            subscribe_voice_text = "Please like and subscribe to my channel for motivational and inspirational topics."
 
             generate_tts_file(comment_question, outro_question_audio)
             generate_tts_file(subscribe_voice_text, outro_subscribe_audio)
@@ -421,15 +458,14 @@ def main():
             subscribe_duration = get_duration(outro_subscribe_audio)
             outro_duration = round(question_duration + OUTRO_PAUSE + subscribe_duration + 1.0, 2)
 
-            outro_clip = temp_dir / "outro.mp4"
-            build_outro_clip(takeaway, comment_question, outro_clip, outro_duration)
-            scene_clips.append(outro_clip)
+            outro_mp4 = temp_dir / "outro.mp4"
+            build_outro_clip(takeaway, comment_question, outro_mp4, outro_duration)
+            clips.append(outro_mp4)
 
             concat_file = temp_dir / "concat.txt"
-            create_concat_file(scene_clips, concat_file)
+            create_concat_file(clips, concat_file)
 
             stitched_video = temp_dir / "stitched.mp4"
-
             cmd_concat = [
                 FFMPEG,
                 "-y",
@@ -439,16 +475,17 @@ def main():
                 "-c:v", "libx264",
                 "-preset", "veryfast",
                 "-crf", "23",
+                "-pix_fmt", "yuv420p",
                 "-an",
                 str(stitched_video)
             ]
             run_cmd(cmd_concat)
 
-            output_file = FINAL_FOLDER / f"full_video_{video_id:03d}.mp4"
+            shifted_srt = temp_dir / "shifted.srt"
+            shift_srt(subtitle_file, shifted_srt, INTRO_DURATION)
+            subtitle_path = shifted_srt.resolve().as_posix().replace(":", r"\:")
 
-            shifted_subtitle = temp_dir / "shifted_subtitles.srt"
-            shift_srt(subtitle_file, shifted_subtitle, INTRO_DURATION)
-            subtitle_path = escape_subtitle_path(shifted_subtitle)
+            output_file = FINAL_FOLDER / f"full_video_{video_id:03d}.mp4"
 
             main_voice_duration = get_duration(voice_file)
             question_start_ms = int((INTRO_DURATION + main_voice_duration) * 1000)
@@ -459,7 +496,7 @@ def main():
                     f"[1:a]adelay={int(INTRO_DURATION*1000)}|{int(INTRO_DURATION*1000)},volume=1.0[mainv];"
                     f"[2:a]adelay={question_start_ms}|{question_start_ms},volume=1.0[qv];"
                     f"[3:a]adelay={subscribe_start_ms}|{subscribe_start_ms},volume=1.0[sv];"
-                    f"[4:a]volume=0.08[mv];"
+                    f"[4:a]volume={MUSIC_VOLUME}[mv];"
                     f"[mainv][qv][sv][mv]amix=inputs=4:duration=longest:dropout_transition=3[aout]"
                 )
 
@@ -474,7 +511,7 @@ def main():
                     "-i", str(music_file),
                     "-filter_complex", filter_complex,
                     "-vf",
-                    f"subtitles='{subtitle_path}':force_style='FontName=Arial,FontSize=26,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=0,MarginV=50'",
+                    f"subtitles='{subtitle_path}':force_style='FontName=Arial,FontSize=28,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=0,MarginV=50'",
                     "-map", "0:v:0",
                     "-map", "[aout]",
                     "-shortest",
@@ -502,7 +539,7 @@ def main():
                     "-i", str(outro_subscribe_audio),
                     "-filter_complex", filter_complex,
                     "-vf",
-                    f"subtitles='{subtitle_path}':force_style='FontName=Arial,FontSize=26,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=0,MarginV=50'",
+                    f"subtitles='{subtitle_path}':force_style='FontName=Arial,FontSize=28,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=0,MarginV=50'",
                     "-map", "0:v:0",
                     "-map", "[aout]",
                     "-shortest",

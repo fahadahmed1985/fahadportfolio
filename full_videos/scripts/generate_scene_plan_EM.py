@@ -1,5 +1,5 @@
 import json
-import math
+import re
 from pathlib import Path
 import pandas as pd
 
@@ -21,28 +21,20 @@ CATEGORY_KEYWORDS = {
     "ocean": ["calm", "silence", "reflection", "peace", "emotion"],
 }
 
-
-def split_into_sentences(text: str) -> list[str]:
-    text = str(text or "").strip()
-    if not text:
-        return []
-    parts = [p.strip() for p in text.replace("\n", " ").split(". ") if p.strip()]
-    cleaned = []
-    for p in parts:
-        if not p.endswith("."):
-            p += "."
-        cleaned.append(p)
-    return cleaned
+SRT_BLOCK_RE = re.compile(
+    r"(\d+)\s+(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})\s+(.*?)(?=\n\d+\n|\Z)",
+    re.DOTALL
+)
 
 
-def estimate_duration(sentence: str) -> float:
-    words = max(1, len(sentence.split()))
-    # documentary pace
-    return round(max(4.0, words / 2.4), 2)
+def parse_srt_timestamp(ts: str) -> float:
+    h, m, s_ms = ts.split(":")
+    s, ms = s_ms.split(",")
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
 
 
-def detect_category(sentence: str) -> str:
-    s = sentence.lower()
+def detect_category(text: str) -> str:
+    s = str(text or "").lower()
     scores = {}
     for category, keywords in CATEGORY_KEYWORDS.items():
         score = sum(1 for kw in keywords if kw in s)
@@ -55,38 +47,66 @@ def detect_category(sentence: str) -> str:
     return max(scores, key=scores.get)
 
 
-def build_scene_plan(full_script: str) -> list[dict]:
-    sentences = split_into_sentences(full_script)
+def load_srt_segments(srt_path: Path) -> list[dict]:
+    content = srt_path.read_text(encoding="utf-8").strip()
+    matches = SRT_BLOCK_RE.findall(content)
+
+    segments = []
+    for _, start_ts, end_ts, text in matches:
+        text = " ".join(line.strip() for line in text.strip().splitlines())
+        segments.append({
+            "start": parse_srt_timestamp(start_ts),
+            "end": parse_srt_timestamp(end_ts),
+            "text": text
+        })
+    return segments
+
+
+def build_scene_plan_from_srt(segments: list[dict]) -> list[dict]:
     scenes = []
+    current_segments = []
+    current_start = None
+    current_end = None
 
-    current_text = []
-    current_duration = 0.0
+    for seg in segments:
+        seg_duration = seg["end"] - seg["start"]
 
-    for sentence in sentences:
-        sentence_duration = estimate_duration(sentence)
+        if not current_segments:
+            current_segments = [seg]
+            current_start = seg["start"]
+            current_end = seg["end"]
+            continue
 
-        # target scene duration: 8–18 sec
-        if current_duration + sentence_duration <= 16:
-            current_text.append(sentence)
-            current_duration += sentence_duration
+        proposed_end = seg["end"]
+        proposed_duration = proposed_end - current_start
+
+        # target 8–16 seconds per scene
+        if proposed_duration <= 16:
+            current_segments.append(seg)
+            current_end = seg["end"]
         else:
-            if current_text:
-                text = " ".join(current_text).strip()
-                scenes.append({
-                    "scene_number": len(scenes) + 1,
-                    "text": text,
-                    "duration_sec": round(current_duration, 2),
-                    "category": detect_category(text)
-                })
-            current_text = [sentence]
-            current_duration = sentence_duration
+            text = " ".join(s["text"] for s in current_segments).strip()
+            scenes.append({
+                "scene_number": len(scenes) + 1,
+                "start": round(current_start, 3),
+                "end": round(current_end, 3),
+                "duration_sec": round(current_end - current_start, 3),
+                "text": text,
+                "category": detect_category(text)
+            })
 
-    if current_text:
-        text = " ".join(current_text).strip()
+            current_segments = [seg]
+            current_start = seg["start"]
+            current_end = seg["end"]
+
+    if current_segments:
+        text = " ".join(s["text"] for s in current_segments).strip()
         scenes.append({
             "scene_number": len(scenes) + 1,
+            "start": round(current_start, 3),
+            "end": round(current_end, 3),
+            "duration_sec": round(current_end - current_start, 3),
             "text": text,
-            "duration_sec": round(current_duration, 2),
             "category": detect_category(text)
         })
 
@@ -96,7 +116,7 @@ def build_scene_plan(full_script: str) -> list[dict]:
 def main():
     df = pd.read_excel(EXCEL_FILE)
 
-    for col in ["Full Script", "Status", "Video File"]:
+    for col in ["Subtitle File", "Status", "Scene Count"]:
         if col in df.columns:
             df[col] = df[col].astype("object")
 
@@ -115,11 +135,11 @@ def main():
         if processed >= MAX_ROWS:
             break
 
-        full_script = str(row.get("Full Script", "") or "").strip()
+        subtitle_file = Path(str(row.get("Subtitle File", "") or "").strip())
         video_id = int(row.get("ID"))
 
-        if not full_script:
-            print(f"Row {i+2} missing Full Script")
+        if not subtitle_file.exists():
+            print(f"Missing subtitle file for row {i+2}")
             failed += 1
             processed += 1
             continue
@@ -127,7 +147,8 @@ def main():
         scene_file = SCENE_FOLDER / f"full_video_{video_id:03d}_scene_plan.json"
 
         try:
-            scenes = build_scene_plan(full_script)
+            segments = load_srt_segments(subtitle_file)
+            scenes = build_scene_plan_from_srt(segments)
 
             payload = {
                 "video_id": video_id,

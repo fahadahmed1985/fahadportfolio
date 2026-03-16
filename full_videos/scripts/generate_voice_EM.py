@@ -10,7 +10,7 @@ VOICE = "en-GB-SoniaNeural"
 RATE = "-10%"
 VOLUME = "+0%"
 
-MAX_ROWS = 1   # test first
+MAX_ROWS = 1
 
 
 async def generate_voice(text: str, output_file: Path):
@@ -46,12 +46,10 @@ async def main():
         if processed >= MAX_ROWS:
             break
 
-        file_name = str(row.get("File Name", "") or "").strip()
         full_script = str(row.get("Full Script", "") or "").strip()
-        video_id = row.get("ID")
+        video_id = int(row.get("ID"))
 
-        if not file_name:
-            file_name = f"full_video_{int(video_id):03d}"
+        file_name = f"full_video_{video_id:03d}"
 
         if not full_script:
             print(f"Skipping row {i+2}: Full Script is blank")
