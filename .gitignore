@@ -5,8 +5,8 @@ final/
 logs/
 
 # source media
-backgrounds/
-music/
+# backgrounds/
+# music/
 
 # excel pipeline
 data/*.xlsx
@@ -15,3 +15,6 @@ data/*.xlsx
 .venv/
 __pycache__/
 *.pyc
+logs/
+token.json
+client_secret.json
