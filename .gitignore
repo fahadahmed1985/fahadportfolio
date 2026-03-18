@@ -29,3 +29,9 @@ client_secret.json
 
 # Ignore heavy folders if needed
 full_videos/backgrounds_full/
+
+*.mp4
+*.mov
+*.avi
+*.mkv
+full_videos/backgrounds_full/
