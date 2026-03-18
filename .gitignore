@@ -35,3 +35,15 @@ full_videos/backgrounds_full/
 *.avi
 *.mkv
 full_videos/backgrounds_full/
+
+token.json
+client_secret.json
+*.mp4
+*.mov
+*.avi
+*.mkv
+full_videos/backgrounds_full/
+.venv/
+__pycache__/
+logs/
+.env
