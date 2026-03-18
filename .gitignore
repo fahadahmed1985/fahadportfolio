@@ -18,3 +18,14 @@ __pycache__/
 logs/
 token.json
 client_secret.json
+
+# Ignore all video files
+*.mp4
+
+# Optional (recommended)
+*.mov
+*.avi
+*.mkv
+
+# Ignore heavy folders if needed
+full_videos/backgrounds_full/
