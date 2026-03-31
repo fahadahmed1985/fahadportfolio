@@ -3,7 +3,6 @@ import json
 import random
 import shutil
 import subprocess
-import textwrap
 from pathlib import Path
 
 import edge_tts
@@ -26,10 +25,10 @@ INTRO_DURATION = 2.2
 OUTRO_PAUSE = 0.8
 RESOLUTION = (1920, 1080)
 FPS = 30
-MUSIC_VOLUME = 0.16
+MUSIC_VOLUME = 0.35
 
-VOICE_NAME = "en-GB-SoniaNeural"
-VOICE_RATE = "-10%"
+DEFAULT_VOICE_NAME = "en-GB-SoniaNeural"
+DEFAULT_VOICE_RATE = "-10%"
 VOICE_VOLUME = "+0%"
 
 
@@ -138,11 +137,9 @@ def build_intro_image(hook_text: str, output_path: Path):
     lines = wrap_for_image(draw, hook_text, font, max_width)
 
     total_height = 0
-    heights = []
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font, stroke_width=3)
         h = bbox[3] - bbox[1]
-        heights.append(h)
         total_height += h
     total_height += (len(lines) - 1) * 18
 
@@ -194,7 +191,8 @@ def create_cinematic_still_video(image_path: Path, duration: float, output_path:
         f"zoompan=z='min(zoom+0.0005,1.06)':d=1:s={width}x{height}:fps={FPS}"
     )
     if fade:
-        vf += ",fade=t=in:st=0:d=0.5,fade=t=out:st=1.5:d=0.6"
+        fade_out_start = max(duration - 0.7, 0.5)
+        vf += f",fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out_start}:d=0.6"
 
     cmd = [
         FFMPEG,
@@ -261,18 +259,18 @@ def create_concat_file(clips, concat_file: Path):
             f.write(f"file '{clip.resolve().as_posix()}'\n")
 
 
-async def tts_save(text: str, output_path: Path):
+async def tts_save(text: str, output_path: Path, voice_name: str, voice_rate: str):
     communicate = edge_tts.Communicate(
         text=text,
-        voice=VOICE_NAME,
-        rate=VOICE_RATE,
+        voice=voice_name,
+        rate=voice_rate,
         volume=VOICE_VOLUME,
     )
     await communicate.save(str(output_path))
 
 
-def generate_tts_file(text: str, output_path: Path):
-    asyncio.run(tts_save(text, output_path))
+def generate_tts_file(text: str, output_path: Path, voice_name: str, voice_rate: str):
+    asyncio.run(tts_save(text, output_path, voice_name, voice_rate))
 
 
 def parse_srt_timestamp(ts: str) -> float:
@@ -348,11 +346,11 @@ def build_outro_clip(summary_text: str, question_text: str, output_path: Path, d
 
         filter_parts.append(
             f"[{idx}:v]format=rgba,scale=72:72,"
-            f"fade=t=in:st={0.8 + n*0.22}:d=0.30:alpha=1[{icon_label}]"
+            f"fade=t=in:st={0.8 + n * 0.22}:d=0.30:alpha=1[{icon_label}]"
         )
         filter_parts.append(
             f"[{current}][{icon_label}]overlay="
-            f"x={x}:y={y}:enable='between(t,{0.75 + n*0.22},{duration})'"
+            f"x={x}:y={y}:enable='between(t,{0.75 + n * 0.22},{duration})'"
             f"[{out_label}]"
         )
         current = out_label
@@ -378,10 +376,32 @@ def build_outro_clip(summary_text: str, question_text: str, output_path: Path, d
         outro_png.unlink()
 
 
+def get_music_file():
+    music_files = sorted(MUSIC_FOLDER.glob("*.mp3"))
+    print("Music folder exists:", MUSIC_FOLDER.exists())
+    print("Music files found:", [p.name for p in music_files])
+
+    if not music_files:
+        return None
+
+    return random.choice(music_files)
+
+
 def main():
     df = pd.read_excel(EXCEL_FILE)
 
-    for col in ["Video File", "Status", "Voice File", "Subtitle File", "Hook", "Takeaway", "Comment Question"]:
+    for col in [
+        "Video File",
+        "Status",
+        "Voice File",
+        "Subtitle File",
+        "Hook",
+        "Takeaway",
+        "Comment Question",
+        "Music Used",
+        "Voice Used",
+        "Voice Rate",
+    ]:
         if col in df.columns:
             df[col] = df[col].astype("object")
 
@@ -390,9 +410,6 @@ def main():
     processed = 0
     success = 0
     failed = 0
-
-    music_files = list(MUSIC_FOLDER.glob("*.mp3"))
-    music_file = music_files[0] if music_files else None
 
     for i, row in df.iterrows():
         status = str(row.get("Status", "")).strip().lower()
@@ -406,6 +423,9 @@ def main():
         hook_text = str(row.get("Hook", "") or "").strip()
         takeaway = str(row.get("Takeaway", "") or "").strip()
         comment_question = str(row.get("Comment Question", "") or "Which point are you trying first?").strip()
+
+        selected_voice = str(row.get("Voice Used", "") or "").strip() or DEFAULT_VOICE_NAME
+        selected_rate = str(row.get("Voice Rate", "") or "").strip() or DEFAULT_VOICE_RATE
 
         voice_file = Path(str(row.get("Voice File", "")).strip())
         subtitle_file = Path(str(row.get("Subtitle File", "")).strip())
@@ -424,6 +444,15 @@ def main():
 
             with open(scene_plan_file, "r", encoding="utf-8") as f:
                 scene_plan = json.load(f)
+
+            music_file = get_music_file()
+            if music_file:
+                print(f"Selected background music: {music_file.name}")
+            else:
+                print("No background music file found.")
+
+            print(f"Main voice file: {voice_file.name}")
+            print(f"Outro voice: {selected_voice} | Rate: {selected_rate}")
 
             clips = []
 
@@ -451,8 +480,8 @@ def main():
 
             subscribe_voice_text = "Please like and subscribe to my channel for motivational and inspirational topics."
 
-            generate_tts_file(comment_question, outro_question_audio)
-            generate_tts_file(subscribe_voice_text, outro_subscribe_audio)
+            generate_tts_file(comment_question, outro_question_audio, selected_voice, selected_rate)
+            generate_tts_file(subscribe_voice_text, outro_subscribe_audio, selected_voice, selected_rate)
 
             question_duration = get_duration(outro_question_audio)
             subscribe_duration = get_duration(outro_subscribe_audio)
@@ -481,6 +510,8 @@ def main():
             ]
             run_cmd(cmd_concat)
 
+            stitched_duration = get_duration(stitched_video)
+
             shifted_srt = temp_dir / "shifted.srt"
             shift_srt(subtitle_file, shifted_srt, INTRO_DURATION)
             subtitle_path = shifted_srt.resolve().as_posix().replace(":", r"\:")
@@ -492,12 +523,16 @@ def main():
             subscribe_start_ms = int((INTRO_DURATION + main_voice_duration + question_duration + OUTRO_PAUSE) * 1000)
 
             if music_file and music_file.exists():
+                print(f"Mixing with music: {music_file.name}")
+
+                fade_out_start = max(0, stitched_duration - 2)
+
                 filter_complex = (
-                    f"[1:a]adelay={int(INTRO_DURATION*1000)}|{int(INTRO_DURATION*1000)},volume=1.0[mainv];"
+                    f"[1:a]adelay={int(INTRO_DURATION * 1000)}|{int(INTRO_DURATION * 1000)},volume=1.0[mainv];"
                     f"[2:a]adelay={question_start_ms}|{question_start_ms},volume=1.0[qv];"
                     f"[3:a]adelay={subscribe_start_ms}|{subscribe_start_ms},volume=1.0[sv];"
-                    f"[4:a]volume={MUSIC_VOLUME}[mv];"
-                    f"[mainv][qv][sv][mv]amix=inputs=4:duration=longest:dropout_transition=3[aout]"
+                    f"[4:a]volume={MUSIC_VOLUME},atrim=0:{stitched_duration},afade=t=out:st={fade_out_start}:d=2[mv];"
+                    f"[mainv][qv][sv][mv]amix=inputs=4:duration=longest:dropout_transition=2[aout]"
                 )
 
                 cmd_final = [
@@ -514,20 +549,24 @@ def main():
                     f"subtitles='{subtitle_path}':force_style='FontName=Arial,FontSize=28,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=0,MarginV=50'",
                     "-map", "0:v:0",
                     "-map", "[aout]",
-                    "-shortest",
                     "-c:v", "libx264",
                     "-preset", "veryfast",
                     "-crf", "23",
                     "-c:a", "aac",
                     "-b:a", "192k",
+                    "-ar", "48000",
+                    "-ac", "2",
+                    "-shortest",
                     str(output_file)
                 ]
             else:
+                print("Rendering without background music...")
+
                 filter_complex = (
-                    f"[1:a]adelay={int(INTRO_DURATION*1000)}|{int(INTRO_DURATION*1000)}[mainv];"
+                    f"[1:a]adelay={int(INTRO_DURATION * 1000)}|{int(INTRO_DURATION * 1000)}[mainv];"
                     f"[2:a]adelay={question_start_ms}|{question_start_ms}[qv];"
                     f"[3:a]adelay={subscribe_start_ms}|{subscribe_start_ms}[sv];"
-                    f"[mainv][qv][sv]amix=inputs=3:duration=longest:dropout_transition=3[aout]"
+                    f"[mainv][qv][sv]amix=inputs=3:duration=longest:dropout_transition=2[aout]"
                 )
 
                 cmd_final = [
@@ -542,18 +581,21 @@ def main():
                     f"subtitles='{subtitle_path}':force_style='FontName=Arial,FontSize=28,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=2,Shadow=0,MarginV=50'",
                     "-map", "0:v:0",
                     "-map", "[aout]",
-                    "-shortest",
                     "-c:v", "libx264",
                     "-preset", "veryfast",
                     "-crf", "23",
                     "-c:a", "aac",
                     "-b:a", "192k",
+                    "-ar", "48000",
+                    "-ac", "2",
+                    "-shortest",
                     str(output_file)
                 ]
 
             run_cmd(cmd_final)
 
             df.at[i, "Video File"] = str(output_file)
+            df.at[i, "Music Used"] = music_file.name if music_file else ""
             df.at[i, "Status"] = "video_done"
 
             success += 1

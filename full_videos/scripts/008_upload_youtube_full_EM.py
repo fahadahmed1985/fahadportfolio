@@ -157,7 +157,7 @@ def main():
     for i, row in df.iterrows():
         status = str(row.get("Status", "") or "").strip().lower()
 
-        if status != "video_done":
+        if status != "thumbnail_done":
             continue
 
         if processed >= MAX_ROWS:

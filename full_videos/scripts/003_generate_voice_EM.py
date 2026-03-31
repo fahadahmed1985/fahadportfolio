@@ -1,4 +1,5 @@
 import asyncio
+import random
 from pathlib import Path
 import pandas as pd
 import edge_tts
@@ -6,18 +7,26 @@ import edge_tts
 EXCEL_FILE = Path("data/EM_full_videos_pipeline.xlsx")
 VOICE_FOLDER = Path("full_videos/voice")
 
-VOICE = "en-GB-SoniaNeural"
-RATE = "-10%"
+# 🎯 Voice Pool (Motivational Style)
+VOICE_POOL = [
+    "en-GB-SoniaNeural",      # calm, clear (default)
+    "en-US-GuyNeural",        # strong male
+    "en-US-AriaNeural",       # emotional female
+    "en-AU-NatashaNeural"     # local AU tone (nice touch)
+]
+
+# Optional slight variation in delivery
+RATE_OPTIONS = ["-5%", "-10%", "-15%"]
 VOLUME = "+0%"
 
 MAX_ROWS = 1
 
 
-async def generate_voice(text: str, output_file: Path):
+async def generate_voice(text: str, output_file: Path, voice: str, rate: str):
     communicate = edge_tts.Communicate(
         text=text,
-        voice=VOICE,
-        rate=RATE,
+        voice=voice,
+        rate=rate,
         volume=VOLUME,
     )
     await communicate.save(str(output_file))
@@ -26,7 +35,7 @@ async def generate_voice(text: str, output_file: Path):
 async def main():
     df = pd.read_excel(EXCEL_FILE)
 
-    text_columns = ["Full Script", "Voice File", "Status"]
+    text_columns = ["Full Script", "Voice File", "Status", "Voice Used"]
     for col in text_columns:
         if col in df.columns:
             df[col] = df[col].astype("object")
@@ -57,12 +66,19 @@ async def main():
 
         output_file = VOICE_FOLDER / f"{file_name}.mp3"
 
+        # 🎯 Random selections
+        selected_voice = random.choice(VOICE_POOL)
+        selected_rate = random.choice(RATE_OPTIONS)
+
         try:
             print(f"Generating voice for {file_name}...")
-            await generate_voice(full_script, output_file)
+            print(f"Voice: {selected_voice} | Rate: {selected_rate}")
+
+            await generate_voice(full_script, output_file, selected_voice, selected_rate)
 
             if output_file.exists() and output_file.stat().st_size > 0:
                 df.at[i, "Voice File"] = str(output_file)
+                df.at[i, "Voice Used"] = selected_voice
                 df.at[i, "Status"] = "voice_done"
                 success += 1
                 print(f"Saved: {output_file}")
